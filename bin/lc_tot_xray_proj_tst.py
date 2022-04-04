@@ -1,4 +1,5 @@
 from binascii import b2a_base64
+from http.cookies import CookieError
 import swiftsimio as sw
 import numpy as np  
 import numpy.ma as ma
@@ -9,7 +10,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import h5py
 import healpy as hp
-from unyt import cm, erg, s
+from unyt import cm, erg, s, c
 from numba import jit
 
 import lightcone_io.particle_reader as pr
@@ -20,38 +21,167 @@ from astropy.cosmology import FlatLambdaCDM, z_at_value
 import os
 from tqdm import tqdm
 
-### create or enter a new directory
-import os
-path = '/cosma8/data/dp004/dc-chen3/narrow_emi_map/mass_tst/'
-dir = 'tot_xray_tst'
-path = path+dir
-# Create a new directory because it does not exist 
-if os.path.exists(path) is False:
-  os.makedirs(path)
-  print('dir '+"is created!")
+'''
+Compute spectra from the particle lightcone output
+We only take part of the sky into account
+Loop through the different lightcone output files
+Find (based on pixels) which particles in the lightcone fall into that patch of sky
+For those particles, interpolate xrays
+With the interpolated xrays:
+- divide by luminosity distance
+- shift energies using redshift
+- bin result into output spectral resolution
+Add results for this lightcone file to overall spectrum for each lightcone pixel
+Go to next file
+'''
 
 ### setting basics
+global input_filename,halo_id,nside,radius,vector,work_path,zoom_size,z_halo,z_halo_range,z_range,rest_line_bin,obs_bin,npix,SelectObsBin,PLOT
+'''
+line_E: float
+        the emission line center, around which the luminosity is interpolated
+
+    line_interval_lo,line_interval_hi: float
+        the interpolated range around the line 
+
+    z_halo: float
+        halo's redshift
+    
+    work_path: str
+        place to save the output plots
+    
+'''
+input_filename = "/cosma8/data/dp004/jch/FLAMINGO/ScienceRuns/L1000N1800/HYDRO_FIDUCIAL/lightcones/lightcone0_particles/lightcone0_0000.0.hdf5"
 halo_id = '10976067'
 nside=16384
+npix = hp.pixelfunc.nside2npix(nside)
 radius = np.radians(1) #deg
-vec = np.array([-0.49919698,-0.03709323,-0.86569421])
+vector = np.array([-0.49919698,-0.03709323,-0.86569421])
+# redshift in sim box
+z_range = np.array([0,0.1]) # z for tot & contam
+# redshift only for halo
+z_halo_range = np.array([0.0486,0.0495]) # z for pure
+# redshift of halo
+z_halo = 0.049
+# fov [-zoom_size,zoom_size] in deg
+zoom_size=1
 
-##### load lightcone data functions ####
-def compute_luminosity_distance(part_lc):
-    distances = np.sqrt(part_lc['Coordinates'][:, 0]**2 + part_lc['Coordinates'][:, 1]**2 + part_lc['Coordinates'][:, 2]**2)
-    redshifts = (1 / part_lc['ExpansionFactors'][()]) - 1
-    luminosity_distances = distances * (1 + redshifts)
-    return luminosity_distances 
+line_E = 0.653 
+line_interval_lo = 0.001
+line_interval_hi = 0.001
+rest_line_bin = np.array([line_E-line_interval_lo,line_E+line_interval_hi])
+obs_bin = np.array([rest_line_bin[0]/(1+z_halo),rest_line_bin[1]/(1+z_halo)]) 
+
+SelectObsBin=False
+PLOT=True
+
+### create or enter a new directory
+if SelectObsBin==False:
+    work_path = '/cosma8/data/dp004/dc-chen3/narrow_emi_map/xray_tot_halo'+ halo_id
+    dir = '/all'
+    work_path = work_path+dir
+    # Create a new directory because it does not exist 
+    if os.path.exists(work_path) is False:
+        os.makedirs(work_path)
+        print('directory '+"is created!")  
+else:
+    work_path = '/cosma8/data/dp004/dc-chen3/narrow_emi_map/xray_tot_halo'+ halo_id
+    dir = '/obs_select'
+    work_path = work_path+dir
+    # Create a new directory because it does not exist 
+    if os.path.exists(work_path) is False:
+        os.makedirs(work_path)
+        print('directory '+"is created!")  
+
+def compute_los_redshift(part_lc,vector):
+    '''
+    This func calculate line of sight velocity
+
+    Parameters
+    -----------------------------------
+    part_lc: particle lightcone, lightcone_data["Velocities"]
+        velocities of particles from extracted swift particle lightcone
     
-@jit(nopython = True)
-def assign_energy_to_bin(flux, bin_numbers_for_flux, lc_spec):
-    for i in range(lc_spec.shape[0]):
-        for j, bin in enumerate(bin_numbers_for_flux[i, :]):
-            lc_spec[i, bin] += flux[i, j]
+    vector: np array 1x3
+        Vector pointing at a spot on the sky (where halo is)
+    
+    Returns
+    -----------------------------------
+    z_los: float
+        line of sight redshift
+    '''
+    vx = part_lc[:,0]
+    vy = part_lc[:,1]
+    vz = part_lc[:,2]
+    vector_norm = np.sqrt(vector[0]**2+vector[1]**2+vector[2]**2)
+    v_los = (vector[0]*vx+vector[1]*vy+vector[2]*vz)/vector_norm
+    z_los = np.sqrt((1+v_los/c)/(1-v_los/c))-1
+    return z_los
 
-    return lc_spec
+def compute_flux(part_lc,data,rest_line_bin,obs_bin):
+    '''
+    This function compute xray luminosity for particle fall in observed energy bin at z=0
+
+    Parameters
+    -----------------------
+    part_lc: lightcone_data["Coordinates"]
+        Coordinates of particles from extracted swift particle lightcone
+
+    data: swift snapshot data, data
+
+    rest_line_bin: np.array 1x2 
+        define restframe interpolate energy range
+    
+    obs_bin: np.array 1x2
+        define observed energy bin at z=0
+
+    Returns
+    -----------------------
+    flux_arr: np.array 1x particle num
+        flux for particles fall in observable bin
+    
+    Print test
+    -----------------------
+    
+    '''
+
+    print('interpolating xrays')
+    E_bin_lo = (rest_line_bin[0]/(1+data.gas.z_los)/(1+data.gas.redshifts)).value
+    E_bin_hi = (rest_line_bin[1]/(1+data.gas.z_los)/(1+data.gas.redshifts)).value
+    particle_fall_in_obs_bin  = 0
+    particle_not_in_obs_bin  = 0
+    particle_partly_in_obs_bin = 0
+    lum,__ = interp_xray(data.gas.densities, data.gas.temperatures, data.gas.smoothed_element_mass_fractions, data.gas.redshifts, data.gas.masses, fill_value = 0, bin_energy_lims = rest_line_bin).T
+    lum_arr = lum
+
+    if SelectObsBin==True:
+        lum_arr = np.zeros(np.shape(data.gas.redshifts))
+        for i in range(len(lum_arr)):
+            if E_bin_lo[i]>obs_bin[0] and E_bin_hi[i]<obs_bin[1]:
+                particle_fall_in_obs_bin +=1
+                lum_arr[i] = lum[i]
+            elif E_bin_lo[i]<obs_bin[0] and E_bin_hi[i]>obs_bin[1]:
+                particle_not_in_obs_bin +=1
+            else:
+                particle_partly_in_obs_bin +=1
+    
+    # compute luminosity distance
+    distances = np.sqrt(part_lc[:, 0]**2 + part_lc[:, 1]**2 + part_lc[:, 2]**2)
+    lum_distances = distances * (1 + data.gas.redshifts)
+    flux_arr = lum_arr/(4*np.pi*lum_distances**2)
+    print("particle_fall_in_obs_bin is %d, particle_not_in_obs_bin is %d, particle_partly_in_obs_bin is %d"%(particle_fall_in_obs_bin,particle_not_in_obs_bin,particle_partly_in_obs_bin) )
+    
+    print('E_bin_lo is ' + str([np.min(E_bin_lo),np.max(E_bin_lo)]))
+    print('E_bin_hi is ' + str([np.min(E_bin_hi),np.max(E_bin_hi)]))
+
+    return flux_arr
+
 
 def load_snapshot():
+    '''
+    # At the moment the interpolation code expects swiftsimio objects, so we need to load a snapshot to get that
+    # Then overwrite the relevant parts in update_data_structure function
+    '''
     filename = "/cosma6/data/dp004/dc-kuge1/200LH_bestfit_tests/FLAMFIDL200N360Nearest_x_ray/bahamas_0008.hdf5"
 
     mask = sw.mask(filename)
@@ -83,181 +213,245 @@ def update_data_structure(data, part_lc):
     data.gas.smoothed_element_mass_fractions.silicon = part_lc['SmoothedElementMassFractions'][:, 7]
     data.gas.smoothed_element_mass_fractions.iron = part_lc['SmoothedElementMassFractions'][:, 8]
     data.gas.redshifts = (1 / part_lc['ExpansionFactors'][()]) - 1
+    data.gas.z_los = compute_los_redshift(part_lc["Velocities"],vector)
     return data
 
-data = load_snapshot()
+def compute_mapdata(part_lc,property_data):
+    '''
+    This function computes map_data for properties, which is input for healpy cartproj plotting
+
+    Parameters
+    ---------------------------
+    part_lc: lightcone_data["Coordinates"].value
+        Coordinates of particles from extracted swift particle lightcone
+     
+    property_data: numpy array
+        data lst for plotting
+
+    Returns
+    ---------------------------
+    map_data/pix_a: np.array (npix * 1)
+        map data list of properties, input for healpy cartproj plotting, which has already divided by pixel area
+        unit: property unit/arcmin^2
+
+    '''
+
+    pix = hp.pixelfunc.vec2pix(nside, part_lc[:,0], part_lc[:,1], part_lc[:,2])
+    # calculate resolution and area for each pixel
+    res = hp.nside2resol(nside,arcmin=True)
+    pix_a = res**2
+    dat = property_data
+    if len(np.shape(dat))>1:
+        dat = property_data.T[0]   
+    map_data = np.zeros(npix, dtype=float)
+    np.add.at(map_data, np.array(pix), np.array(dat)/pix_a)
+
+    return map_data
 
 
-def load_lightcone(vector,radius):
-    print('loading lightcone')
-    # Specify one file from the spatially indexed lightcone particle data
-    input_filename = "/cosma8/data/dp004/jch/FLAMINGO/ScienceRuns/L1000N1800/HYDRO_FIDUCIAL/lightcones/lightcone0_particles/lightcone0_0000.0.hdf5"
+def plot_all(map_data,property_name,property_units,redshift_range,plot_settings):
+    '''
+    This function is for plotting (imshow) surface brightness values
 
-    # Part of the sky to plot
-    vector = vec  # Vector pointing at a spot on the sky
-    radius = radius # Angular radius around that spot
+    Parameters
+    ------------------------------
+    map_data_lst: np.array (npix * properties num)
+        map data list of properties, output from compute_mapdata
+        unit: property unit/arcmin^2
 
-    # Redshift range to plot (set to None for all redshifts in the lightcone)
-    redshift_range = (0.0, 0.1)
+    property_name: list (str)
+        list contain data for plotting
 
+    property_units: list (str)
+        units for properties
+
+    redshift_range: np.array (1x2)
+        describe data's redshift_range, used in data's title
+    plot_settings: dict
+        {"data_filter":[1e33,1e35], "cmap":"binary","cbar_ticks":np.logspace(1e33,1e35,num=8)}
+    Returns:
+    ------------------------------
+        
+    plot lots of imshow plots: 
+
+    '''
+    cartproj = hp.projector.CartesianProj(
+                lonra=[-zoom_size, zoom_size], latra=[-zoom_size, zoom_size], rot=hp.vec2ang(np.array(vector),lonlat=True)
+            )
+    fig, ax = plt.subplots(1, 1, figsize = (6, 6))
+    pR = cartproj.projmap(map_data, lambda x, y, z: hp.vec2pix(nside, x, y, z))
+    pR[pR<=0]=np.nan
+    
+    if np.count_nonzero(~np.isnan(pR))>0:
+        cmap = plot_settings['cmap']
+        vmin = plot_settings['data_filter'][0]
+        vmax = plot_settings['data_filter'][1]
+        cbar_ticks = plot_settings['cbar_ticks']
+        cbar_ticklabels = [str(i) for i in list(cbar_ticks)]
+        # pR[(pR>vmax) & (pR<vmin)]=0
+        im = ax.imshow(pR, norm = LogNorm(),cmap=cmap, extent=[-60,60,-60,60])
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes('right', size='5%', pad=0.05)
+        fig.colorbar(im, cax=cax, orientation='vertical')
+        ax.set_title(property_name+' ('+property_units+')')
+        plt.suptitle('\n restframe line '+str(rest_line_bin)+' received line '+str(obs_bin)+' (keV)')
+
+        ax.set_xlabel('RA (arcmin)')
+        ax.set_ylabel('DEC (arcmin)')
+    else:
+        print(property_name+ " values are all nan!")
+
+    plt.tight_layout()
+    plt.savefig(work_path+'/'+property_name+'_halo_'+halo_id+
+            '_z_'+str(redshift_range[0])+'_'+str(redshift_range[1])+'.png'
+        )
+    plt.close()
+    print('finish plotting '+property_name)
+    del map_data
+
+def compute_xray(input_filename,vector,radius,redshift_range,PLOT):
+    '''
+    This function first read lightcone file, then computes xray flux for each particle
+    if PLOT==True, plot all parameters' plots except for xrays
+
+    Parameters
+    -----------------------------
+    input_filename: str
+        The input particle lightcone file (has been sorted by lightconeio)
+
+    vector: np.array 1x3
+        Vector pointing at a spot on the sky
+
+    radius: float 
+        Angular radius around that spot (radian)
+
+    z_range: np.array 1x2
+        redshift range 
+
+    PLOT: boolen 
+        if PLOT==True, plot all parameters' plots except for xrays
+    
+    Returns
+    ----------------------------
+    flux_map: np.array (npix * 1)
+        xray flux of particles falls in obs bin, binned by pixels and divided by pixel area
+        output to calculate contam
+
+    coor: np.array (3*particle num)
+        coordinates from lightcone_data, output for plotting xray
+
+    '''
+    print("loading lightcone")
     # Open the lightcone
     lightcone = pr.IndexedLightcone(input_filename)
 
     # Read in the particle positions and masses
-    property_names = ("Coordinates", "Masses", "SmoothedElementMassFractions", "Densities", "Temperatures", "ExpansionFactors")
-    data = lightcone["Gas"].read(property_names=property_names,
+    property_names = ("Coordinates","Masses", "SmoothedElementMassFractions", "Densities", "Temperatures", "ExpansionFactors","Velocities")
+    lightcone_data = lightcone["Gas"].read_exact(property_names=property_names,
                                 redshift_range=redshift_range,
                                 vector=vector, radius=radius,)
-    data['mass'] = data['Masses'].value
-    
-    ### save ra & dec
-    data['RA'], data['DEC'] = hp.vec2ang(data['Coordinates'].value, lonlat = True)   
-    ### convert ra,dec directly to xy 
-    if os.path.exists('lc_spec_xy.npz'):
-        print('loading xy')
-        xy = np.load('lc_spec_xy.npz')
-        data['x'] = xy['x']
-        data['y'] = xy['y']
-    else:
-        print('converting xy')
-        zoom_size=1 #deg
-        cartproj = hp.projector.CartesianProj(
-                lonra=[-zoom_size, zoom_size], latra=[-zoom_size, zoom_size], rot=hp.vec2ang(np.array(vec),lonlat=True)
-            )
-        ra,dec =hp.vec2ang(data['Coordinates'].value, lonlat = True)   
-        x = np.zeros(ra.shape)
-        y = np.zeros(dec.shape)
-        for i in tqdm(range(len(ra))):
-            x[i],y[i]= cartproj.ang2xy(ra[i],dec[i],lonlat=True)
-        data['x']=x
-        data['y']=y
-        np.savez('lc_spec_xy.npz',x=x,y=y)
-    return data
-
-##### define function to interpolate x-ray flux #####
-def compute_xrays(line_E,line_interval,z_halo):
-    print('loading lightcone data')
-    lightcone_data = load_lightcone(vec,radius)
-
-    # Load a fake snapshot
-    print('loading swiftsimio struct')
-    data = load_snapshot()
 
     # Put relevant parts into snapshot data structure
-    print('putting lightcone data into swiftsimio struct')
+    data = load_snapshot()
     data = update_data_structure(data, lightcone_data)
-    z_max = data.gas.redshifts.max() # max redshift in sims
-    z_halo_max = z_halo+0.025
-    rest_line_bin = [line_E-line_interval,line_E+line_interval]
-    obs_bin = [rest_line_bin[0]/(1+z_halo_max),rest_line_bin[1]]    
+    nr_particles = len(data.gas.redshifts)
+    print("Total number of particles added to map = %d" % nr_particles)
+    coor = np.array(lightcone_data["Coordinates"].value)
+    flux_arr = compute_flux(coor,data,rest_line_bin,obs_bin)
 
-    for i, tp in enumerate(['pure', 'contaminated']):
-        # Interpolate xrays
-        print('interpolating xrays')
-        if tp == 'pure':
-            min_energy_for_interp = rest_line_bin[0]
-            max_energy_for_interp = rest_line_bin[1]
-        elif tp == 'contaminated':
-            min_energy_for_interp = rest_line_bin[0]/ (1 + z_halo_max)**2/(1+z_max)
-            max_energy_for_interp = rest_line_bin[1]
-        xray_spec_lum, restframe_energies = interp_xray(data.gas.densities, data.gas.temperatures, data.gas.smoothed_element_mass_fractions, data.gas.redshifts, data.gas.masses, fill_value = 0, bin_energy_lims = [min_energy_for_interp, max_energy_for_interp])
-        print('computing xray luminosity')
-        received_energies = restframe_energies / (1 + data.gas.redshifts[:, np.newaxis])
-        # Compute flux for all particles
-        lum_distance = compute_luminosity_distance(lightcone_data)
-        # For each particle bin see which energy bin x ray luminosity falls into 
-        print('selecting luminosity')
-        xray_spec_lum = [x if obs_bin[0]<x<obs_bin[1] else 0 for x in xray_spec_lum]
-        print('computing xray flux')
-        xray_spec_flux = xray_spec_lum / (4 * np.pi * lum_distance[:, np.newaxis]**2)
-        np.save('Xray_spectrum_{}'.format(tp),xray_spec_flux)
+    if PLOT==True:
+        print("plotting others ...")
+        # plot mass, density, temperature, metal, z_los 
+        properties_data=[data.gas.masses, data.gas.densities,data.gas.temperatures,data.gas.smoothed_element_mass_fractions.oxygen,data.gas.redshifts,data.gas.z_los]
+        properties_name = ["mass","density", "temperature", "Oxygen abundance", "particle_redshift","line_of_sight_redshift"]
+        properties_units = [r'10$M_{sun}/arcmin^2$',r'6.8e-31$g/cm^3/arcmin^2$',r'$K/arcmin^2$',r'/arcmin^2',r'/arcmin^2',r'/arcmin^2']
+        for i in range(len(properties_name)):
+            map_data = compute_mapdata(coor,properties_data[i].value)
+            plot_all(map_data,properties_name[i],properties_units[i],redshift_range)
+            del map_data
+        print("plotting others finishes!")
+    return flux_arr,coor
 
-###### define plot functions #####
-def msk_dat(dat):
-    dat = ma.masked_invalid(dat)
-    dat = ma.masked_where(dat<=0,dat)
-    vmin = dat.min()
-    vmax = dat.max()
-    if vmax==np.nan:
-        return dat, 'nan','nan'   
+def main(check_filename,redshift_range):
+    '''
+    This is function for calculating xray map data for one property and plotting
+
+    Parameters
+    ---------------------------------------
+    check_filename: lst (str)
+        lst of pure & tot map_data name
+
+    redshift_range: np.array (1x2)
+        describe data's redshift_range, used in data's title
+
+    Returns
+    ---------------------------------------
+    save xray flux as npz
+
+    plot xray
+
+    '''
+    if os.path.exists(work_path+'/'+check_filename+'.npz') is False:
+        # compute pure xrays
+        print("computing datas ...")
+        flux,coor = compute_xray(input_filename,vector,radius,redshift_range,PLOT)
+        np.savez(work_path+'/'+check_filename+'.npz',flux=flux,coor=coor)
     else:
-        return dat,vmin,vmax
-        
-def plot_xy(dat,ax,prop_names,x,y):
-    grid = 0.05
-    xbins = np.round((np.max(x)-np.min(x))/grid)+1 # 50 kpc grid
-    ybins = np.round((np.max(y)-np.min(y))/grid)+1 # 50 kpc grid
-    xedges = np.arange(np.min(x),np.min(x)+xbins*grid,grid)
-    yedges = np.arange(np.min(y),np.min(y)+ybins*grid,grid)
-    dat_bin, xedges, yedges  = np.histogram2d(x,y, 
-        weights = dat,  bins = (xedges, yedges)
-        )
-    dat_bin,vmin,vmax = msk_dat(dat_bin)
-    print('mass binned data ranges %s, %s'%(str(vmin),str(vmax)))
-    if vmax>0:
-        dat_bin = dat_bin.T
-        X, Y = np.meshgrid(xedges, yedges)
-        dat_bin[dat_bin<=0]=np.nan
-        im = ax.pcolormesh(X,Y,dat_bin,norm = LogNorm(),cmap='binary')
-     
-        divider = make_axes_locatable(ax)
-        cax = divider.append_axes('right', size='5%', pad=0.05)
-        fig.colorbar(im, cax=cax, orientation='vertical')
-        ax.set_title(prop_names)
-        ax.set_xticks(np.linspace(np.min(x),np.min(x)+xbins*grid,10))
-        ax.set_yticks(np.linspace(np.min(y),np.min(y)+ybins*grid,10))
-    else: 
-        print('error: all nan')
+        print("loading datas ...")
+        data = np.load(work_path+'/'+check_filename+'.npz')
+        flux = data['flux']
+        coor = data['coor']
+    flux_map = compute_mapdata(coor,flux)
+    plot_all(flux_map,check_filename,r'erg/s/$cm^3/s/arcmin^2$',redshift_range)
+    del flux_map,flux,coor,data
 
-###### read & compute data #####
-lightcone_data = load_lightcone(vec,radius)
 
-# Add a spectrum to each particle
-if os.path.exists('Xray_spectrum_pure.npy'):
-    tot = np.load('Xray_spectrum_pure.npy')
-else:
-    compute_xrays(0.653,0.001,0.05)
-dat = tot  
-# dat = lightcone_data['mass']
 
-######## plot xy ##########
-fig, ax = plt.subplots(1, 1, figsize = (6, 6))
-plot_xy(dat,ax,'mass',lightcone_data['x'],lightcone_data['y'])
-ax.set_xlabel('x (Mpc)')
-ax.set_ylabel('y (Mpc)')   
-plt.savefig('halo_tot_xray_tst_xy_'+str(halo_id)+'.png')
+# ##### compute, save and plot pure and total data 
+# main('xray_flux_pure',z_halo_range)
+# main('xray_flux_tot',z_range)
 
-####### plot ra dec ########
-fig, ax = plt.subplots(1, 1, figsize = (6, 6))
-plot_xy(dat,ax,'mass',lightcone_data['RA'],lightcone_data['DEC'])
-ax.set_xlabel('RA (deg)')
-ax.set_ylabel('DEC (deg)')   
-plt.savefig('halo_tot_xray_tst_radec_'+str(halo_id)+'.png')
+##### compute, plot contam data, save take so long time!
+# if os.path.exists(work_path+'/'+'xray_flux_map_contam'+'.npz') is False:
 
-####### convert ra,dec to pix and cartproj ----!!! value will be different, resolution will be smaller!  ########
-pix = hp.ang2pix(nside,lightcone_data['RA'],lightcone_data['DEC'],lonlat=True)
-fig, ax = plt.subplots(1, 1, figsize = (6, 6))
-### creat new healpix map
-npix = hp.pixelfunc.nside2npix(nside)
-zoom_size=1 #deg
-cartproj = hp.projector.CartesianProj(
-        lonra=[-zoom_size, zoom_size], latra=[-zoom_size, zoom_size], rot=hp.vec2ang(np.array(vec),lonlat=True)
-    )
-mollproj = hp.projector.MollweideProj()
-dat = dat
-map_data = np.zeros(npix, dtype=float)
-np.add.at(map_data, pix, dat)
+data_pure = np.load(work_path+'/'+'xray_flux_pure'+'.npz')
+data_tot = np.load(work_path+'/'+'xray_flux_tot'+'.npz')
 
-pR = cartproj.projmap(map_data, lambda x, y, z: hp.vec2pix(nside, x, y, z))
-pR[pR<=0]=np.nan
+flux_pure = data_pure['flux'][0]
+pure_coor = data_pure['coor']
+flux_tot = data_tot['flux'][0]
+tot_coor = data_tot['coor']
 
-if np.count_nonzero(~np.isnan(pR))>0:
-    im = ax.imshow(pR, norm = LogNorm(),cmap='binary')
-    divider = make_axes_locatable(ax)
-    cax = divider.append_axes('right', size='5%', pad=0.05)
-    fig.colorbar(im, cax=cax, orientation='vertical')
-    ax.set_title('gas mass')
+# create contam flux
+pure_pix = hp.pixelfunc.vec2pix(nside,pure_coor[:,0], pure_coor[:,1], pure_coor[:,2])
+tot_pix = hp.pixelfunc.vec2pix(nside,tot_coor[:,0], tot_coor[:,1], tot_coor[:,2])
 
-plt.tight_layout()
-plt.savefig('halo_tot_xray_tst_pix_'+str(halo_id)+'.png')
-plt.close()
+flux_contam = np.zeros(np.shape(flux_tot))
+for i in tqdm(range(len(tot_pix))):
+    for j in range(len(pure_pix)):
+        if tot_pix[i] == pure_pix[j]:
+            flux_contam[i] = flux_tot[i]-flux_pure[j]
+
+np.savez(work_path+'/xray_flux_contam',flux=flux_contam,coor=tot_coor)
+flux_map = compute_mapdata(tot_coor,flux_contam)
+
+plot_settings = {"data_filter":[1e33,1e35], "cmap":"tab10","cbar_ticks":np.logspace(1e33,1e35,num=8)}
+plot_all(flux_map,'xray_flux_contam',r'erg/s/$cm^3/s/arcmin^2$',z_range,plot_settings)
+
+del flux_map,flux_pure,pure_coor,tot_coor,pure_pix,tot_pix,flux_contam
+
+    #flux_map = np.zeros(npix)
+    # print('computing contam 1/2 ...')
+    # np.add.at(flux_map,tot_pix,flux_tot)
+    # print('computing contam 2/2 ...')
+    # np.add.at(flux_map,pure_pix,-flux_pure)
+    # plot_settings = {"data_filter":[1e33,1e35], "cmap":"tab10","cbar_ticks":np.logspace(1e33,1e35,num=8)}
+    # plot_all(flux_map,'xray_flux_contam',r'erg/s/$cm^3/s/arcmin^2$',z_range,plot_settings)    
+
+    # del flux_map,flux_pure,pure_coor,tot_coor,pure_pix,tot_pix
+
+
+    
+
+
+
