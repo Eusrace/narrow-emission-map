@@ -41,66 +41,13 @@ With the interpolated xrays:
 Add results for this lightcone file to overall spectrum for each lightcone pixel
 Go to next file
 '''
+####### setting basic globals #########
 
-################################# setting global variables ###############################
-# global input_filename,halo_id,nside,radius,vector,work_path,zoom_size,z_halo,z_halo_range,z_range,rest_line_bin,obs_bin,npix,SelectObsBin,PLOT,xsize
-global input_filename, work_path
+global input_filename
 input_filename = "/cosma8/data/dp004/jch/FLAMINGO/ScienceRuns/L1000N1800/HYDRO_FIDUCIAL/lightcones/lightcone0_particles/lightcone0_0000.0.hdf5"
-work_path = "."
-# ## halo basics
-# halo_id = '10976067'
-# radius = np.radians(1) #deg
-# vector = np.array([-0.49919698,-0.03709323,-0.86569421])
 
-# ### healpy plotting basics
-# nside=16384
-# npix = hp.pixelfunc.nside2npix(nside)
-# xsize = 300 # determine pixel number of final cartproj plot
-# zoom_size=1  # fov [-zoom_size,zoom_size] in deg
 
-# ### redshifts for plot titles
-# # redshift in sim box
-# z_range = np.array([0,0.1]) # z for tot & contam
-# # redshift only for halo
-# z_halo_range = np.array([0.0486,0.0495]) # z for pure
-# # redshift of halo
-# z_halo = np.median(z_halo_range)
-
-# ### interpolate line bins
-# line_E = 0.653 
-# line_interval_lo = 0.001
-# line_interval_hi = 0.001
-# rest_line_bin = np.array([line_E-line_interval_lo,line_E+line_interval_hi])
-# obs_bin = np.array([(rest_line_bin[0]-2*line_interval_lo)/(1+z_halo),rest_line_bin[1]/(1+z_halo)]) 
-
-# ### bool parameters
-# SelectObsBin=True  # whether selected emissions by observed bin
-# PLOT=False  # whether plot others (not including xrays)
-
-# ### create or enter a new directory
-# work_path = '/cosma8/data/dp004/dc-chen3/narrow_emi_map/xray_tot_halo'+ halo_id
-
-# if SelectObsBin==False:
-#     dir = '/all'
-#     work_path = work_path+dir
-#     # Create a new directory because it does not exist 
-#     if os.path.exists(work_path) is False:
-#         os.makedirs(work_path)
-#         os.makedirs(work_path+'/data')
-#         os.makedirs(work_path+'/png')
-#         print('directory '+"is created!")  
-# else:
-#     dir = '/obs_select'
-#     work_path = work_path+dir
-#     # Create a new directory because it does not exist 
-#     if os.path.exists(work_path) is False:
-#         os.makedirs(work_path)
-#         os.makedirs(work_path+'/data')
-#         os.makedirs(work_path+'/png')
-#         print('directory '+"is created!")  
-
-################################## define functions ##############################################
-
+#################### function provides global variables ######################
 def dist(x1,y1,z1,x2,y2,z2):
         return ((x1-x2)**2+(y1-y2)**2+(z1-z2)**2)**0.5
 
@@ -143,7 +90,7 @@ def compute_lc_coords(input_filename,xcoords,ycoords,zcoords):
 
     return xcoords_w_r_t_LC1,ycoords_w_r_t_LC1,zcoords_w_r_t_LC1
 
-def select_halo(input_filename,catalog_redshift,m200,RELAX):
+def select_halo(input_filename,catalog_redshift,m200_lo,m200_hi,RELAX):
     '''
     This function select halos in velociprator catalog at given redshift 
 
@@ -155,8 +102,8 @@ def select_halo(input_filename,catalog_redshift,m200,RELAX):
     catalog_redshift: float 
         catalogue's redshift for catalogue selecting
 
-    m200: float, unit: 10^10 Msun
-        lower limit of halo mass for selecting halo
+    m200_lo, m200_hi: float, unit: 10^10 Msun
+        lower and upper limit of halo mass for selecting halo
     
     RELAX: bool
         if select only relaxed halo (distance btw cmbp and c < 100kpc)
@@ -182,7 +129,7 @@ def select_halo(input_filename,catalog_redshift,m200,RELAX):
 
     ##### select high mass halo
     m200_crit=catalogue.masses.mass_200crit
-    ind2 = np.where(m200_crit>m200)
+    ind2 = np.where((m200_crit>m200_lo) & (m200_crit<m200_hi))
 
     ##### whether select relaxed halo
     # halo center position
@@ -223,14 +170,14 @@ def select_halo(input_filename,catalog_redshift,m200,RELAX):
     print(ind_fin)
     ###### second selection w/ redshift and save output
     if RELAX==True:
-        outfilename='haloid_m200c_'+str(m200)+'_1e10msun_z_'+str(z_sh)+'_'+lc_str+'_relaxed'
+        outfilename='haloid_m200c_'+str(m200_lo)+'_'+str(m200_hi)+'_1e10msun_z_'+str(z_sh)+'_'+lc_str+'_relaxed'
     else: 
-        outfilename='haloid_m200c_'+str(m200)+'_1e10msun_z_'+str(z_sh)+'_'+lc_str+'_unrelaxed'
+        outfilename='haloid_m200c_'+str(m200_lo)+'_'+str(m200_hi)+'_1e10msun_z_'+str(z_sh)+'_'+lc_str+'_unrelaxed'
 
-    np.save(work_path+'/'+outfilename, [int(i) for i in ind_fin])
-    print(work_path+outfilename+" has been saved!")
+    np.save(outfilename, [int(i) for i in ind_fin])
+    print(outfilename+" has been saved!")
 
-def load_halo_properties(halo_id,catalog_redshift,SAVETXT):
+def load_halo_properties(halo_id,catalog_redshift):
     '''
     This function load and calculate halo properties 
 
@@ -238,9 +185,10 @@ def load_halo_properties(halo_id,catalog_redshift,SAVETXT):
     --------------------
     halo_id: int
         index of halo in velociprator catalog 
-    
-    SAVETXT: bool
-        whether save halo properties to a txt
+
+    Returns 
+    --------------------
+    z_halo, z_halo_range, m200c.to(1e10*unyt.Msun), r200m.to(Mpc).value, r200m_arcmin, r200c.to(Mpc).value,  vector
     '''
 
     cat_ind = str(int(77-np.round(catalog_redshift/0.05)))
@@ -288,6 +236,59 @@ def load_halo_properties(halo_id,catalog_redshift,SAVETXT):
     print(z_halo.value, z_halo_range, m200c.to(1e10*unyt.Msun).value, r200m.to(Mpc), r200m_arcmin.value, r200c.to(Mpc),  vector)
     return z_halo, z_halo_range, m200c.to(1e10*unyt.Msun), r200m.to(Mpc).value, r200m_arcmin, r200c.to(Mpc).value,  vector
 
+
+################################# setting halo global variables ###############################
+global halo_id,nside,radius,vector,work_path,zoom_size,z_halo,z_halo_range,z_range,rest_line_bin,obs_bin,npix,SelectObsBin,PLOT,xsize
+
+## halo basics
+halo_id = '12464493'
+z_halo, z_halo_range, __,__, __,__, vector = load_halo_properties(int(halo_id),0)
+
+### healpy plotting basics
+nside=16384
+radius = np.radians(1) #deg
+npix = hp.pixelfunc.nside2npix(nside)
+xsize = 300 # determine pixel number of final cartproj plot
+zoom_size=1  # fov [-zoom_size,zoom_size] in deg
+
+### redshifts for plot titles
+# redshift in sim box
+z_range = np.array([0,0.1]) # z for tot & contam
+
+### interpolate line bins
+line_E = 0.653 
+line_interval_lo = 0.001
+line_interval_hi = 0.001
+rest_line_bin = np.array([line_E-line_interval_lo,line_E+line_interval_hi])
+obs_bin = np.array([(rest_line_bin[0]-2*line_interval_lo)/(1+z_halo),rest_line_bin[1]/(1+z_halo)]) 
+
+### bool parameters
+SelectObsBin=True  # whether selected emissions by observed bin
+PLOT=True  # whether plot others (not including xrays)
+
+### create or enter a new directory
+work_path = '/cosma8/data/dp004/dc-chen3/narrow_emi_map/xray_tot_halo'+ halo_id
+
+if SelectObsBin==False:
+    dir = '/all'
+    work_path = work_path+dir
+    # Create a new directory because it does not exist 
+    if os.path.exists(work_path) is False:
+        os.makedirs(work_path)
+        os.makedirs(work_path+'/data')
+        os.makedirs(work_path+'/png')
+        print('directory '+"is created!")  
+else:
+    dir = '/obs_select'
+    work_path = work_path+dir
+    # Create a new directory because it does not exist 
+    if os.path.exists(work_path) is False:
+        os.makedirs(work_path)
+        os.makedirs(work_path+'/data')
+        os.makedirs(work_path+'/png')
+        print('directory '+"is created!")  
+
+################################## functions may need global vars ##############################################
 
 def compute_los_redshift(part_lc,vector):
     '''
@@ -601,37 +602,38 @@ def main(check_filename,redshift_range):
 
 
 
-# # ##### compute, save and plot pure and total data, if has computed pure and tot before, just load the data
-# main('xray_flux_pure',z_halo_range)
-# main('xray_flux_tot',z_range)
+# ##### compute, save and plot pure and total data, if has computed pure and tot before, just load the data
+main('xray_flux_pure',z_halo_range)
+main('xray_flux_tot',z_range)
 
-# ##### compute, plot contam data (saving takes lots of time, so didn't save contam)
-# print('computing contam ... ')
-# data_pure = np.load(work_path+'/data/'+'xray_flux_pure'+'.npz')
-# data_tot = np.load(work_path+'/data/'+'xray_flux_tot'+'.npz')
-# flux_pure = data_pure['flux']
-# # print(np.shape(data_pure['flux']))
-# # print(np.shape(flux_pure))
-# # print(np.count_nonzero(flux_pure))
+##### compute, plot contam data (saving takes lots of time, so didn't save contam)
+print('computing contam ... ')
+data_pure = np.load(work_path+'/data/'+'xray_flux_pure'+'.npz')
+data_tot = np.load(work_path+'/data/'+'xray_flux_tot'+'.npz')
+flux_pure = data_pure['flux']
+# print(np.shape(data_pure['flux']))
+# print(np.shape(flux_pure))
+# print(np.count_nonzero(flux_pure))
 
-# pure_coor = data_pure['coor']
-# flux_tot = data_tot['flux']
-# # print(np.shape(data_tot['flux']))
-# # print(np.shape(flux_tot))
-# # print(np.count_nonzero(flux_tot))
-# tot_coor = data_tot['coor']
-# # calculate 2 map directly and substract them
-# flux_map_tot = compute_mapdata(tot_coor,flux_tot)
-# flux_map_pure = compute_mapdata(pure_coor,flux_pure)
-# flux_map = flux_map_tot-flux_map_pure
-# # print(np.count_nonzero(flux_map))
-# plot_settings = {"data_filter":[1e30,1e36], "cmap":"binary"}
-# plot_all(flux_map,'xray_contam',r'erg/s/$cm^3/s/arcmin^2$',z_range,plot_settings) 
-# del flux_map_pure,flux_map_tot,flux_map,data_pure,data_tot,flux_pure,pure_coor,flux_tot,tot_coor
+pure_coor = data_pure['coor']
+flux_tot = data_tot['flux']
+# print(np.shape(data_tot['flux']))
+# print(np.shape(flux_tot))
+# print(np.count_nonzero(flux_tot))
+tot_coor = data_tot['coor']
+# calculate 2 map directly and substract them
+flux_map_tot = compute_mapdata(tot_coor,flux_tot)
+flux_map_pure = compute_mapdata(pure_coor,flux_pure)
+flux_map = flux_map_tot-flux_map_pure
+# print(np.count_nonzero(flux_map))
+plot_settings = {"data_filter":[1e30,1e36], "cmap":"binary"}
+plot_all(flux_map,'xray_contam',r'erg/s/$cm^3/s/arcmin^2$',z_range,plot_settings) 
+del flux_map_pure,flux_map_tot,flux_map,data_pure,data_tot,flux_pure,pure_coor,flux_tot,tot_coor
 
 
-#### test select halo
-# select_halo(input_filename,0,1e4,RELAX=True)
-load_halo_properties(10976067,0,SAVETXT=True)
+### select halo
+# select_halo(input_filename,0,1e2,1e3,RELAX=True)
+# print(np.load("haloid_m200c_100.0_1000.0_1e10msun_z_0.05_lightcone0_relaxed.npy"))
+# load_halo_properties(12464493,0)
 
  
