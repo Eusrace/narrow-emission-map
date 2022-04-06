@@ -12,6 +12,8 @@ def idx_x2y(x,y):
         value for comparing with x array
 
     '''
+    import numpy as np
+
     index = np.argsort(x)
     sorted_x = x[index]
     sorted_index = np.searchsorted(sorted_x, y)
@@ -22,7 +24,4 @@ def idx_x2y(x,y):
     result = np.ma.array(yindex, mask=mask)
     return result
 
-# ## check the index of pure_pix in tot_pix
-# tot2pure = compute_contam(tot_pix,pure_pix)
-# for i,t2p in tqdm(enumerate(tot2pure)):
-#     flux_contam[t2p] -= flux_pure[i]
+
