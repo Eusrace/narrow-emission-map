@@ -11,6 +11,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import h5py
 import healpy as hp
+import unyt
 from unyt import cm, erg, s, c,Mpc,kpc
 from numba import jit
 
@@ -127,12 +128,10 @@ def compute_lc_coords(input_filename,xcoords,ycoords,zcoords):
         xcoords_w_r_t_LC1 = (xcoords - 750)
         ycoords_w_r_t_LC1 = (ycoords - 750)
         zcoords_w_r_t_LC1 = (zcoords - 750)
-        lc_c=[750,750,750]
     elif lc_str == 'lightcone1':
         xcoords_w_r_t_LC1 = (xcoords - 250)
         ycoords_w_r_t_LC1 = (ycoords - 250)
         zcoords_w_r_t_LC1 = (zcoords - 250)
-        lc_c=[250,250,250]
 
     xcoords_w_r_t_LC1[xcoords_w_r_t_LC1 > 500] -= 1000
     ycoords_w_r_t_LC1[ycoords_w_r_t_LC1 > 500] -= 1000
@@ -254,28 +253,40 @@ def load_halo_properties(halo_id,catalog_redshift,SAVETXT):
     xcmbp= catalogue.positions.xcmbp.to(Mpc).value[halo_id]
     ycmbp= catalogue.positions.ycmbp.to(Mpc).value[halo_id]
     zcmbp= catalogue.positions.zcmbp.to(Mpc).value[halo_id]
-    xcmbp_lc,ycmbp_lc,zcmbp_lc = compute_lc_coords(input_filename,xcmbp,ycmbp,zcmbp)
+
+    lc_str = input_filename.split('/')[-1].split('_')[0]
+    
+    def reset(x):
+        if lc_str == 'lightcone0':
+            x1 = x-750
+        elif lc_str == 'lightcone1':
+            x1 = x-250
+
+        if x1>500:
+            x1 -=1000
+        elif x1<-500:
+            x1+=1000
+        return x1
+
+    xcmbp_lc = reset(xcmbp)
+    ycmbp_lc = reset(ycmbp)
+    zcmbp_lc = reset(zcmbp)
     m200c=catalogue.masses.mass_200crit[halo_id]
     r200m=catalogue.radii.r_200mean[halo_id]
     r200c=catalogue.radii.r_200crit[halo_id]
-    r500c=catalogue.radii.r_500crit[halo_id]
+    vector = np.array([xcmbp_lc,ycmbp_lc,zcmbp_lc])  
 
     ## calculate properties
-    r200m_arcmin = DESyr3.arcsec_per_kpc_comoving(r200m.to(kpc))/60
-
-    vector = np.array([xcmbp_lc,ycmbp_lc,zcmbp_lc])  
-      
     dist_lc = dist(xcmbp_lc,ycmbp_lc,zcmbp_lc,0,0,0)
-    
-    z_max = z_at_value(DESyr3.comoving_distance,dist_lc+r200m,zmax=0.5)
-    z_min = z_at_value(DESyr3.comoving_distance,dist_lc-r200m,zmax=0.5)
+    z_halo = z_at_value(DESyr3.comoving_distance,dist_lc*u.Mpc,zmax=0.5)
+    z_max = z_at_value(DESyr3.comoving_distance,(dist_lc+r200m.value)*u.Mpc,zmax=0.5)
+    z_min = z_at_value(DESyr3.comoving_distance,(dist_lc-r200m.value)*u.Mpc,zmax=0.5)
     z_halo_range = np.array([z_min,z_max])
+    r200m_arcmin = DESyr3.arcsec_per_kpc_comoving(z_halo)/60*r200m*1000
 
-    if SAVETXT==True:
-        with open('halo'+str(halo_id)+'_properties.txt', 'w') as f:
-            f.write('z_halo_range = [%2f,%2f]\n m200c = %4f 1e14 Msun \n r200m = %3f \n r200m_arcmin = %2f \n r200c = %3f \n r500c = %3f \n vector = [%6f,%6f,%6f]'%(z_min,z_max,m200c/1e4, r200m.to(Mpc).value, r200m_arcmin, r200c.to(Mpc).value, r500c.to(Mpc).value,xcmbp_lc,ycmbp_lc,zcmbp_lc))
-    print(z_halo_range, m200c/1e4, r200m.to(Mpc).value, r200m_arcmin, r200c.to(Mpc).value, r500c.to(Mpc).value, vector)
-    return z_halo_range, m200c/1e4, r200m.to(Mpc).value, r200m_arcmin, r200c.to(Mpc).value, r500c.to(Mpc).value, vector
+    print("z_halo", "z_halo_range", "m200c.to(1e10*Msun)", "r200m.to(Mpc)", 'r200m_arcmin (arcmin)', "r200c.to(Mpc)",  "vector (Mpc)")
+    print(z_halo.value, z_halo_range, m200c.to(1e10*unyt.Msun).value, r200m.to(Mpc), r200m_arcmin.value, r200c.to(Mpc),  vector)
+    return z_halo, z_halo_range, m200c.to(1e10*unyt.Msun), r200m.to(Mpc).value, r200m_arcmin, r200c.to(Mpc).value,  vector
 
 
 def compute_los_redshift(part_lc,vector):
