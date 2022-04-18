@@ -1,4 +1,5 @@
 from binascii import b2a_base64
+from fileinput import lineno
 from http.cookies import CookieError
 from xmlrpc.server import MultiPathXMLRPCServer
 import swiftsimio as sw
@@ -44,7 +45,10 @@ Go to next file
 ####### setting basic globals #########
 
 global input_filename
+# mid res 1Gpc
 input_filename = "/cosma8/data/dp004/jch/FLAMINGO/ScienceRuns/L1000N1800/HYDRO_FIDUCIAL/lightcones/lightcone0_particles/lightcone0_0000.0.hdf5"
+# hi res 1Gpc
+# input_filename = "/cosma8/data/dp004/jlvc76/FLAMINGO/ScienceRuns/L1000N3600/HYDRO_FIDUCIAL/lightcones/lightcone0_particles/lightcone0_0000.0.hdf5"
 
 
 #################### function provides global variables ######################
@@ -188,7 +192,7 @@ def load_halo_properties(halo_id,catalog_redshift):
 
     Returns 
     --------------------
-    z_halo, z_halo_range, m200c.to(1e10*unyt.Msun), r200m.to(Mpc).value, r200m_arcmin, r200c.to(Mpc).value,  vector
+    z_halo, z_halo_range, m200c.to(1e9*unyt.Msun), r200m.to(Mpc).value, r200m_arcmin, r200c.to(Mpc).value,  vector
     '''
 
     cat_ind = str(int(77-np.round(catalog_redshift/0.05)))
@@ -238,18 +242,19 @@ def load_halo_properties(halo_id,catalog_redshift):
 
 
 ################################# setting halo global variables ###############################
-global halo_id,nside,radius,vector,work_path,zoom_size,z_halo,z_halo_range,z_range,rest_line_bin,obs_bin,npix,SelectObsBin,PLOT,xsize
+global halo_id,nside,radius,vector,work_path,zoom_size,z_halo,z_halo_range,z_range,rest_line_bin,obs_bin,npix,SelectObsBin,PLOT,xsize,pix_a
 
 ## halo basics
-halo_id = '12464493'
+halo_id = '10976067'
 z_halo, z_halo_range, __,__, __,__, vector = load_halo_properties(int(halo_id),0)
 
 ### healpy plotting basics
 nside=16384
 radius = np.radians(1) #deg
 npix = hp.pixelfunc.nside2npix(nside)
-xsize = 300 # determine pixel number of final cartproj plot
+xsize = 120 # determine pixel number of final cartproj plot
 zoom_size=1  # fov [-zoom_size,zoom_size] in deg
+pix_a = (2*zoom_size*60/xsize)**2 # calculate resolution and area for each pixel
 
 ### redshifts for plot titles
 # redshift in sim box
@@ -257,14 +262,13 @@ z_range = np.array([0,0.1]) # z for tot & contam
 
 ### interpolate line bins
 line_E = 0.653 
-line_interval_lo = 0.001
-line_interval_hi = 0.001
+line_interval_lo = 0.15
+line_interval_hi = 0.15
 rest_line_bin = np.array([line_E-line_interval_lo,line_E+line_interval_hi])
 obs_bin = np.array([(rest_line_bin[0]-2*line_interval_lo)/(1+z_halo),rest_line_bin[1]/(1+z_halo)]) 
 
 ### bool parameters
-SelectObsBin=True  # whether selected emissions by observed bin
-PLOT=True  # whether plot others (not including xrays)
+SelectObsBin=False  # whether selected emissions by observed bin
 
 ### create or enter a new directory
 work_path = '/cosma8/data/dp004/dc-chen3/narrow_emi_map/xray_tot_halo'+ halo_id
@@ -338,8 +342,9 @@ def compute_flux(part_lc,data):
     E_bin_lo = (rest_line_bin[0]/(1+data.gas.z_los)/(1+data.gas.redshifts)).value
     E_bin_hi = (rest_line_bin[1]/(1+data.gas.z_los)/(1+data.gas.redshifts)).value
 
-    lum,__ = interp_xray(data.gas.densities, data.gas.temperatures, data.gas.smoothed_element_mass_fractions, data.gas.redshifts, data.gas.masses, fill_value = 0, bin_energy_lims = rest_line_bin)
+    lum,restframe_energy = interp_xray(data.gas.densities, data.gas.temperatures, data.gas.smoothed_element_mass_fractions, data.gas.redshifts, data.gas.masses, fill_value = 0, bin_energy_lims = rest_line_bin)
     lum_arr = np.transpose(lum)
+    print(restframe_energy)
 
     if SelectObsBin==True:
         particle_fall_in_obs_bin  = 0
@@ -360,10 +365,12 @@ def compute_flux(part_lc,data):
     distances = np.sqrt(part_lc[:, 0]**2 + part_lc[:, 1]**2 + part_lc[:, 2]**2)
     lum_distances = distances * (1 + data.gas.redshifts)
     flux_arr = lum_arr/(4*np.pi*lum_distances**2)
+    print(np.shape(lum_arr))
+    print(np.shape(lum_distances))
     print('E_bin_lo is ' + str([np.min(E_bin_lo),np.max(E_bin_lo)]))
     print('E_bin_hi is ' + str([np.min(E_bin_hi),np.max(E_bin_hi)]))
 
-    return flux_arr
+    return flux_arr,restframe_energy
 
 
 def load_snapshot():
@@ -405,46 +412,45 @@ def update_data_structure(data, part_lc):
     data.gas.z_los = compute_los_redshift(part_lc["Velocities"],vector)
     return data
 
-def compute_mapdata(part_lc,property_data):
+def compute_mapdata(pix,property_data):
     '''
     This function computes map_data for properties, which is input for healpy cartproj plotting
 
     Parameters
     ---------------------------
-    part_lc: lightcone_data["Coordinates"].value
-        Coordinates of particles from extracted swift particle lightcone
+    pix: np.array (pix number for all particles * 1)
+        pixel calculated from each particle's coordinates, by healpy
      
     property_data: numpy array
         data lst for plotting
 
     Returns
     ---------------------------
-    map_data/pix_a: np.array (npix * 1)
-        map data list of properties, input for healpy cartproj plotting, which has already divided by pixel area
+    map_data: np.array (pixel number for all sky map * 1)
+        map data list of properties, input for healpy cartproj plotting
         unit: property unit/arcmin^2
 
     '''
 
-    pix = hp.pixelfunc.vec2pix(nside, part_lc[:,0], part_lc[:,1], part_lc[:,2])
-    # calculate resolution and area for each pixel
-    pix_a = (2*60/xsize)**2
     dat = property_data
     if len(np.shape(dat))>1:
         dat = property_data.T[0]   
     map_data = np.zeros(npix)
-    np.add.at(map_data, np.array(pix), np.array(dat)/pix_a)
-
+    try:
+        np.add.at(map_data, np.array(pix), np.array(dat))
+    except:
+        print(np.shape(pix),np.shape(dat))
     return map_data
 
 
-def plot_all(map_data,property_name,property_units,redshift_range,plot_settings):
+def plot_all(map_data,property_name,property_units,property_cmap,redshift_range,plot_settings):
     '''
     This function is for plotting (imshow) surface brightness values
 
     Parameters
     ------------------------------
-    map_data_lst: np.array (npix * properties num)
-        map data list of properties, output from compute_mapdata
+    map_data: np.array (1 x npix)
+        properties' map data, output from compute_mapdata
         unit: property unit/arcmin^2
 
     property_name: list (str)
@@ -453,11 +459,15 @@ def plot_all(map_data,property_name,property_units,redshift_range,plot_settings)
     property_units: list (str)
         units for properties
 
+    property_cmap: list (str)
+        define color bar's color for properties
+    
     redshift_range: np.array (1x2)
         describe data's redshift_range, used in data's title
 
     plot_settings: dict
-        {"data_filter":[1e33,1e35], "cmap":"binary"}
+        {"data_filter":[1e33,1e35], "mode":"lin"/"log"}
+    
     Returns:
     ------------------------------
         
@@ -470,36 +480,68 @@ def plot_all(map_data,property_name,property_units,redshift_range,plot_settings)
             )
     fig, ax = plt.subplots(1, 1, figsize = (6, 6))
     pR = cartproj.projmap(map_data, lambda x, y, z: hp.vec2pix(nside, x, y, z))
-    
-    cmap = plot_settings['cmap']
-    if len(plot_settings['data_filter'])>1:
-        vmin = plot_settings['data_filter'][0]
-        vmax = plot_settings['data_filter'][1]
-        vnorm = LogNorm(vmin,vmax)
+    mode = plot_settings['mode']
+    extent = np.array([-zoom_size,zoom_size,-zoom_size,zoom_size])*60
+    if mode =='log':
+        if len(plot_settings['data_filter'])>1:
+            vmin = plot_settings['data_filter'][0]
+            vmax = plot_settings['data_filter'][1]
+            im = ax.imshow(pR, norm=LogNorm(vmin,vmax),cmap=property_cmap, extent=extent)
+        else:
+            vmin = np.sort(pR[pR>0], axis=None)[2]
+            vmax = np.max(pR)
+            im = ax.imshow(pR, norm=LogNorm(vmin,vmax),cmap=property_cmap, extent=extent)
     else:
-        vnorm = LogNorm()
-    
-    # plt.hist(pR)
-    im = ax.imshow(pR, norm=vnorm,cmap=cmap, extent=[-60,60,-60,60])
+        if len(plot_settings['data_filter'])>1:
+            vmin = plot_settings['data_filter'][0]
+            vmax = plot_settings['data_filter'][1]
+            im = ax.imshow(pR, vmin = vmin,vmax = vmax,cmap=property_cmap, extent=extent)
+        else:
+            vmin = np.min(map_data)
+            vmax = np.max(map_data)
+            im = ax.imshow(pR, vmin = vmin,vmax = vmax,cmap=property_cmap, extent=extent)
+    print(vmin,vmax)
+    print(mode)
+
     divider = make_axes_locatable(ax)
     cax = divider.append_axes('right', size='5%', pad=0.05)
     fig.colorbar(im, cax=cax, orientation='vertical')
-    ax.set_title(property_name+' ('+property_units+')'+
-        '\n rest line '+str(rest_line_bin)+' received line [%4f,%4f](keV)'%(obs_bin[0],obs_bin[1]))
+    ax.set_title(property_name+' ('+property_units+')')
+        # '\n rest line '+str(rest_line_bin)+' received line [%4f,%4f](keV)'%(obs_bin[0],obs_bin[1]))
 
     ax.set_xlabel('RA (arcmin)')
     ax.set_ylabel('DEC (arcmin)')
-
-
     plt.tight_layout()
     plt.savefig(work_path+'/png/'+property_name+'_halo_'+halo_id+
             '_z_'+str(redshift_range[0])+'_'+str(redshift_range[1])+'.png'
         )
     plt.close()
+
+    ###### plot hist only for debugging (it will be slow)
+    # fig, ax = plt.subplots(2, 2, figsize = (12, 6))
+    # ax[0,0].hist(map_data,range=(vmin,vmax))#,bins = np.linspace(vmin,vmax,num=200))
+    # ax[0,0].set_title("map_data filtered")
+    # ax[0,1].hist(pR,range=(vmin,vmax))#,bins = np.linspace(vmin,vmax,num=200))
+    # ax[0,1].set_title("pR filtered")
+    # ax[1,0].hist(map_data)#,np.linspace(np.min(map_data),np.max(map_data),num=200))
+    # ax[1,0].set_title("map_data all")
+    # ax[1,1].hist(pR)#,np.linspace(np.min(map_data),np.max(map_data),num=200))
+    # ax[1,1].set_title("pR all")
+    # for a in ax.flat:
+    #     if mode == "log":
+    #         a.set_xscale("log")
+    #         a.set_yscale("log")
+    #     else:
+    #         a.set_xscale("linear")
+    #         a.set_yscale("linear")
+    #     a.label_outer()
+    # plt.savefig(work_path+'/png/'+property_name+'_hist.png')
+    # plt.close()
+
     print('finish plotting '+property_name)
     del map_data
 
-def compute_xray(input_filename,vector,radius,redshift_range,PLOT):
+def compute_xray(input_filename,vector,radius,redshift_range,PLOT,COMPUTE,SEL_SPEC_PARTICLE):
     '''
     This function first read lightcone file, then computes xray flux for each particle
     if PLOT==True, plot all parameters' plots except for xrays
@@ -520,6 +562,13 @@ def compute_xray(input_filename,vector,radius,redshift_range,PLOT):
 
     PLOT: boolen 
         if PLOT==True, plot all parameters' plots except for xrays
+    
+    COMPUTE: boolen
+        if COMPUTE==Ture, compute xray flux 
+    
+    SEL_SPEC_PARTICLE: boolen
+        if SEL_SPEC_PARTICLE==True, select particles in certain temperature band to plot spectrum
+        and output particle index and its properties for plot_spec func
     
     Returns
     ----------------------------
@@ -546,22 +595,94 @@ def compute_xray(input_filename,vector,radius,redshift_range,PLOT):
     data = update_data_structure(data, lightcone_data)
     nr_particles = len(data.gas.redshifts)
     print("Total number of particles added to map = %d" % nr_particles)
-    coor = np.array(lightcone_data["Coordinates"].value)
-    flux_arr = compute_flux(coor,data)
+    coor = np.array(lightcone_data["Coordinates"].to(unyt.cm).value)
+
+    pix = hp.pixelfunc.vec2pix(nside, coor[:,0], coor[:,1], coor[:,2])
+    # count how many particles fall in each pixel, divide the property value by praticle number in each pixel 
+    __,idx,counts = np.unique(pix,return_inverse=True,return_counts=True) 
+    weights = np.ones(np.shape(pix))/counts[idx]
+
+    if COMPUTE==True:
+        print("calculating xray ...")
+        flux_arr,restframe_energy = compute_flux(coor,data)
+        return flux_arr,coor,restframe_energy
 
     if PLOT==True:
         print("plotting others ...")
-        # plot mass, density, temperature, metal, z_los 
-        properties_data=[data.gas.masses, data.gas.densities,data.gas.temperatures,data.gas.smoothed_element_mass_fractions.oxygen,data.gas.redshifts,data.gas.z_los]
-        properties_name = ["mass","density", "temperature", "Oxygen abundance", "particle_redshift","line_of_sight_redshift"]
-        properties_units = [r'10$M_{sun}/arcmin^2$',r'6.8e-31$g/cm^3/arcmin^2$',r'$K/arcmin^2$',r'$/arcmin^2$',r'$/arcmin^2$',r'$/arcmin^2$']
+        # plot mass & abundance averaged by pixel area; temperature, particle redshifts and los redshifts averaged by particle number in each pixel; particles counts map
+        properties_data = [data.gas.masses/(unyt.Msun*1e10)/pix_a,data.gas.temperatures*weights,data.gas.smoothed_element_mass_fractions.oxygen*data.gas.masses/(unyt.Msun*1e10)/pix_a,data.gas.redshifts*weights,data.gas.z_los*weights,counts[idx]]
+        properties_name = ["mass", "temperature", "Oxygen_abundance","particle_redshift","line_of_sight_redshift","particle_counts"]
+        properties_units = [r'$10^{10} M_{sun}/arcmin^2$','K',r'$10^{10} M_{sun}/arcmin^2$',' ',' ',' ']
+        properties_cmaps = ['cividis','hot','summer','coolwarm','coolwarm','binary']
+        plot_settings =[{"data_filter":[],"mode":"log"},{"data_filter":[],"mode":"log"},{"data_filter":[],"mode":"log"},{"data_filter":[0.04,0.06],"mode":"lin"},{"data_filter":[],"mode":"lin"},{"data_filter":[],"mode":"lin"}]
+
         for i in range(len(properties_name)):
-            map_data = compute_mapdata(coor,properties_data[i].value)
-            plot_settings = {"data_filter":[0], "cmap":"binary"}
-            plot_all(map_data,properties_name[i],properties_units[i],redshift_range,plot_settings)
+            map_data = compute_mapdata(pix,properties_data[i])
+            plot_all(map_data,properties_name[i],properties_units[i],properties_cmaps[i],redshift_range,plot_settings[i])
             del map_data
         print("plotting others finishes!")
-    return flux_arr,coor
+    
+    if SEL_SPEC_PARTICLE==True:
+        '''
+        1. choose one particle from each temperture range for plotting spectrum
+        3. print the particle's properties
+        '''
+        T_bins = [1e5,1e6,1e7,1e8,1e9]
+        idx_arr,temp,abun,mass,reds = [[] for i in range(5)]
+
+        for i in range(len(T_bins)-1):
+            T_msk = (T_bins[i]<data.gas.temperatures) & (data.gas.temperatures<T_bins[i+1])
+            idx1 = np.arange(nr_particles)[T_msk]
+            if len(idx1)>0:
+                idx = int(idx1[2])
+                idx_arr.append(idx)
+                temp.append(data.gas.temperatures.value[idx])
+                abun.append(data.gas.smoothed_element_mass_fractions.oxygen[idx].value*(data.gas.masses[idx].to(unyt.Msun).value))
+                mass.append(data.gas.masses[idx].to(unyt.Msun).value)
+                reds.append(data.gas.redshifts.value[idx])
+            else:
+                continue
+        np.savez(work_path+'/data/'+'spec_particle',idx=idx_arr,mass=mass,temp=temp,abun=abun,reds=reds)
+        print(np.array(idx_arr))
+        print('Particles for plotting spectrum have been selected! \n Properties save as spec_particle.npz in /data subdirectory')
+
+def plot_spec(flux_filename,idx_filename):
+    '''
+    This function plot spectrum of one particle
+
+    Parameters
+    ---------------------------------------
+    flux_filename: npz
+        file name of flux_file containing flux which size:(particle_num, joey bins), coor, restframe_energy
+    
+    idx_filename: npz
+        file name of selected particles (for plotting spectrums) , containing their properties & index
+
+    Returns
+    ---------------------------------------
+    plots of spectrums of each particle at each temperature
+    '''
+    flux_file = np.load(work_path+"/data/"+flux_filename)
+    flux = flux_file['flux']
+    restframe_energy = flux_file['restframe_energy']
+    idx_file = np.load(work_path+"/data/"+idx_filename)
+    idx_arr = idx_file['idx']
+    temp = idx_file['temp']
+    mass = idx_file['mass']
+    abun = idx_file['abun']
+
+    for i,idx in enumerate(idx_arr):
+        fig, ax = plt.subplots(1, 1, figsize = (10, 5))
+        ax.stairs(flux[:,idx],edges=restframe_energy)
+        ax.set_ylabel('xray flux for each bin $(erg/s/cm^2)$')
+        ax.set_xlabel('rest frame energy (keV)')
+        ax.set_title("spectrum of particle "+str(idx)+" \ntemperature is "+ "{:.2e}".format(temp[i])+" K mass is "+ "{:.2e}".format(mass[i])+" Msun abun is "+ "{:.2e}".format(abun[i])+" Msun")
+        if np.count_nonzero(flux[:,idx])>0:
+            ax.set_yscale("log")
+        plt.savefig(work_path+"/png/"+"spectrum_of_particle_"+str(idx))
+        plt.close()
+        print("spectrum_of_particle_"+str(idx)+" has been plotted!")
+
 
 def main(check_filename,redshift_range):
     '''
@@ -585,50 +706,55 @@ def main(check_filename,redshift_range):
     if os.path.exists(work_path+'/data/'+check_filename+'.npz') is False:
         # compute pure xrays
         print("computing " + check_filename)
-        flux,coor = compute_xray(input_filename,vector,radius,redshift_range,PLOT)
-        np.savez_compressed(work_path+'/data/'+check_filename+'.npz',flux=flux,coor=coor)
+        flux,coor,restframe_energy = compute_xray(input_filename,vector,radius,redshift_range,PLOT=True, COMPUTE=True)
+        np.savez_compressed(work_path+'/data/'+check_filename+'.npz',flux=flux,coor=coor,restframe_energy = restframe_energy)
         print(work_path+'/data/'+check_filename+'.npz  has been saved!')
     else:
         print("loading " + check_filename)
         data = np.load(work_path+'/data/'+check_filename+'.npz')
         flux = data['flux']
         coor = data['coor']
-    print("plotting " + check_filename)
-    flux_map = compute_mapdata(coor,flux)
-    plot_settings = {"data_filter":[1e30,1e36], "cmap":"binary"}
-    plot_all(flux_map,check_filename,r'erg/s/$cm^3/s/arcmin^2$',redshift_range,plot_settings)
-
-
+        restframe_energy = data['restframe_energy']
+    
+    for i in range(len(restframe_energy)-1):
+        print("plotting " + check_filename +"bin %d"%i)
+        flux_map = compute_mapdata(coor,flux[i])
+        plot_settings = {"data_filter":[0],"mode":"log"}
+        plot_all(flux_map/pix_a,check_filename+'_'+str(restframe_energy[i])+'_'+str(restframe_energy[i+1]),r'erg/s/$cm^2/arcmin^2$','plasma',redshift_range,plot_settings)
 
 
 
 # ##### compute, save and plot pure and total data, if has computed pure and tot before, just load the data
-main('xray_flux_pure',z_halo_range)
-main('xray_flux_tot',z_range)
+# main('xray_flux_pure',z_halo_range)
+# main('xray_flux_tot',z_range)
 
-##### compute, plot contam data (saving takes lots of time, so didn't save contam)
-print('computing contam ... ')
-data_pure = np.load(work_path+'/data/'+'xray_flux_pure'+'.npz')
-data_tot = np.load(work_path+'/data/'+'xray_flux_tot'+'.npz')
-flux_pure = data_pure['flux']
-# print(np.shape(data_pure['flux']))
-# print(np.shape(flux_pure))
-# print(np.count_nonzero(flux_pure))
+compute_xray(input_filename,vector,radius,z_halo_range,PLOT=False,COMPUTE=False,SEL_SPEC_PARTICLE=True)
+plot_spec("xray_flux_pure.npz","spec_particle.npz")
 
-pure_coor = data_pure['coor']
-flux_tot = data_tot['flux']
-# print(np.shape(data_tot['flux']))
-# print(np.shape(flux_tot))
-# print(np.count_nonzero(flux_tot))
-tot_coor = data_tot['coor']
-# calculate 2 map directly and substract them
-flux_map_tot = compute_mapdata(tot_coor,flux_tot)
-flux_map_pure = compute_mapdata(pure_coor,flux_pure)
-flux_map = flux_map_tot-flux_map_pure
-# print(np.count_nonzero(flux_map))
-plot_settings = {"data_filter":[1e30,1e36], "cmap":"binary"}
-plot_all(flux_map,'xray_contam',r'erg/s/$cm^3/s/arcmin^2$',z_range,plot_settings) 
-del flux_map_pure,flux_map_tot,flux_map,data_pure,data_tot,flux_pure,pure_coor,flux_tot,tot_coor
+# ##### compute, plot contam data (saving takes lots of time, so didn't save contam)
+# print('computing contam ... ')
+# data_pure = np.load(work_path+'/data/'+'xray_flux_pure'+'.npz')
+# data_tot = np.load(work_path+'/data/'+'xray_flux_tot'+'.npz')
+# flux_pure = data_pure['flux']
+# # print(np.shape(data_pure['flux']))
+# # print(np.shape(flux_pure))
+# # print(np.count_nonzero(flux_pure))
+
+# pure_coor = data_pure['coor']
+# flux_tot = data_tot['flux']
+# # print(np.shape(data_tot['flux']))
+# # print(np.shape(flux_tot))
+# # print(np.count_nonzero(flux_tot))
+# tot_coor = data_tot['coor']
+# # calculate 2 map directly and substract them
+# flux_map_tot = compute_mapdata(tot_coor,flux_tot)
+# flux_map_pure = compute_mapdata(pure_coor,flux_pure)
+# flux_map = flux_map_tot-flux_map_pure
+# # print(np.count_nonzero(flux_map))
+# plot_settings = {"data_filter":[1e30,1e36], "cmap":"binary"}
+
+# plot_all(flux_map/pix_a,'xray_contam',r'erg/s/$cm^2/arcmin^2$','plasma',z_range,plot_settings) 
+# del flux_map_pure,flux_map_tot,flux_map,data_pure,data_tot,flux_pure,pure_coor,flux_tot,tot_coor
 
 
 ### select halo
