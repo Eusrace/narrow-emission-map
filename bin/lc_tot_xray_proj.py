@@ -1,6 +1,7 @@
 from binascii import b2a_base64
 from fileinput import lineno
 from http.cookies import CookieError
+from wsgiref.validate import PartialIteratorWrapper
 from xmlrpc.server import MultiPathXMLRPCServer
 import swiftsimio as sw
 import numpy as np  
@@ -242,10 +243,10 @@ def load_halo_properties(halo_id,catalog_redshift):
 
 
 ################################# setting halo global variables ###############################
-global halo_id,nside,radius,vector,work_path,zoom_size,z_halo,z_halo_range,z_range,rest_line_bin,obs_bin,npix,SelectObsBin,PLOT,xsize,pix_a
+global halo_id,nside,radius,vector,work_path,zoom_size,z_halo,z_halo_range,z_range,rest_line_bin,npix,PLOT,xsize,pix_a
 
 ## halo basics
-halo_id = '10976067'
+halo_id = '11079805'
 z_halo, z_halo_range, __,__, __,__, vector = load_halo_properties(int(halo_id),0)
 
 ### healpy plotting basics
@@ -265,32 +266,21 @@ line_E = 0.653
 line_interval_lo = 0.15
 line_interval_hi = 0.15
 rest_line_bin = np.array([line_E-line_interval_lo,line_E+line_interval_hi])
-obs_bin = np.array([(rest_line_bin[0]-2*line_interval_lo)/(1+z_halo),rest_line_bin[1]/(1+z_halo)]) 
-
-### bool parameters
-SelectObsBin=False  # whether selected emissions by observed bin
+# obs line bin
+obs_bin_rest = np.array([0.65,0.7]) 
+obs_bin_received = obs_bin_rest/(1+z_halo.value)
 
 ### create or enter a new directory
 work_path = '/cosma8/data/dp004/dc-chen3/narrow_emi_map/xray_tot_halo'+ halo_id
+dir = '/'+str(line_E-line_interval_lo)+"-"+str(line_E+line_interval_hi)
+work_path = work_path+dir
+# Create a new directory because it does not exist 
+if os.path.exists(work_path) is False:
+    os.makedirs(work_path)
+    os.makedirs(work_path+'/data')
+    os.makedirs(work_path+'/png')
+    print('directory '+"is created!")  
 
-if SelectObsBin==False:
-    dir = '/all'
-    work_path = work_path+dir
-    # Create a new directory because it does not exist 
-    if os.path.exists(work_path) is False:
-        os.makedirs(work_path)
-        os.makedirs(work_path+'/data')
-        os.makedirs(work_path+'/png')
-        print('directory '+"is created!")  
-else:
-    dir = '/obs_select'
-    work_path = work_path+dir
-    # Create a new directory because it does not exist 
-    if os.path.exists(work_path) is False:
-        os.makedirs(work_path)
-        os.makedirs(work_path+'/data')
-        os.makedirs(work_path+'/png')
-        print('directory '+"is created!")  
 
 ################################## functions may need global vars ##############################################
 
@@ -345,21 +335,6 @@ def compute_flux(part_lc,data):
     lum,restframe_energy = interp_xray(data.gas.densities, data.gas.temperatures, data.gas.smoothed_element_mass_fractions, data.gas.redshifts, data.gas.masses, fill_value = 0, bin_energy_lims = rest_line_bin)
     lum_arr = np.transpose(lum)
     print(restframe_energy)
-
-    if SelectObsBin==True:
-        particle_fall_in_obs_bin  = 0
-        particle_not_in_obs_bin  = 0
-        particle_partly_in_obs_bin = 0
-        lum_arr = np.zeros(np.shape(data.gas.redshifts))
-        for i in range(len(lum_arr)):
-            if E_bin_lo[i]>obs_bin[0] and E_bin_hi[i]<obs_bin[1]:
-                particle_fall_in_obs_bin +=1
-                lum_arr[i] = lum[i]
-            elif E_bin_lo[i]<obs_bin[0] and E_bin_hi[i]>obs_bin[1]:
-                particle_not_in_obs_bin +=1
-            else:
-                particle_partly_in_obs_bin +=1
-        print("particle_fall_in_obs_bin is %d, particle_not_in_obs_bin is %d, particle_partly_in_obs_bin is %d"%(particle_fall_in_obs_bin,particle_not_in_obs_bin,particle_partly_in_obs_bin) )
     
     # compute luminosity distance
     distances = np.sqrt(part_lc[:, 0]**2 + part_lc[:, 1]**2 + part_lc[:, 2]**2)
@@ -585,7 +560,7 @@ def compute_xray(input_filename,vector,radius,redshift_range,PLOT,COMPUTE,SEL_SP
     lightcone = pr.IndexedLightcone(input_filename)
 
     # Read in the particle positions and masses
-    property_names = ("Coordinates","Masses", "SmoothedElementMassFractions", "Densities", "Temperatures", "ExpansionFactors","Velocities")
+    property_names = ("Coordinates","Masses", "SmoothedElementMassFractions", "Densities", "Temperatures", "ExpansionFactors","Velocities","ParticleIDs")
     lightcone_data = lightcone["Gas"].read_exact(property_names=property_names,
                                 redshift_range=redshift_range,
                                 vector=vector, radius=radius,)
@@ -597,15 +572,15 @@ def compute_xray(input_filename,vector,radius,redshift_range,PLOT,COMPUTE,SEL_SP
     print("Total number of particles added to map = %d" % nr_particles)
     coor = np.array(lightcone_data["Coordinates"].to(unyt.cm).value)
 
-    pix = hp.pixelfunc.vec2pix(nside, coor[:,0], coor[:,1], coor[:,2])
     # count how many particles fall in each pixel, divide the property value by praticle number in each pixel 
+    pix = hp.pixelfunc.vec2pix(nside, coor[:,0], coor[:,1], coor[:,2])
     __,idx,counts = np.unique(pix,return_inverse=True,return_counts=True) 
     weights = np.ones(np.shape(pix))/counts[idx]
 
     if COMPUTE==True:
         print("calculating xray ...")
         flux_arr,restframe_energy = compute_flux(coor,data)
-        return flux_arr,coor,restframe_energy
+        return flux_arr,pix,restframe_energy,data.gas.redshifts.value,data.gas.z_los.value
 
     if PLOT==True:
         print("plotting others ...")
@@ -613,7 +588,7 @@ def compute_xray(input_filename,vector,radius,redshift_range,PLOT,COMPUTE,SEL_SP
         properties_data = [data.gas.masses/(unyt.Msun*1e10)/pix_a,data.gas.temperatures*weights,data.gas.smoothed_element_mass_fractions.oxygen*data.gas.masses/(unyt.Msun*1e10)/pix_a,data.gas.redshifts*weights,data.gas.z_los*weights,counts[idx]]
         properties_name = ["mass", "temperature", "Oxygen_abundance","particle_redshift","line_of_sight_redshift","particle_counts"]
         properties_units = [r'$10^{10} M_{sun}/arcmin^2$','K',r'$10^{10} M_{sun}/arcmin^2$',' ',' ',' ']
-        properties_cmaps = ['cividis','hot','summer','coolwarm','coolwarm','binary']
+        properties_cmaps = ['cividis','hot','summer','coolwarm','coolwarm','Paired']
         plot_settings =[{"data_filter":[],"mode":"log"},{"data_filter":[],"mode":"log"},{"data_filter":[],"mode":"log"},{"data_filter":[0.04,0.06],"mode":"lin"},{"data_filter":[],"mode":"lin"},{"data_filter":[],"mode":"lin"}]
 
         for i in range(len(properties_name)):
@@ -627,8 +602,8 @@ def compute_xray(input_filename,vector,radius,redshift_range,PLOT,COMPUTE,SEL_SP
         1. choose one particle from each temperture range for plotting spectrum
         3. print the particle's properties
         '''
-        T_bins = [1e5,1e6,1e7,1e8,1e9]
-        idx_arr,temp,abun,mass,reds = [[] for i in range(5)]
+        T_bins = [1e4,1e5,1e6,1e7,1e8,1e9]
+        idx_arr,temp,abun,mass,reds,particleid = [[] for i in range(5)]
 
         for i in range(len(T_bins)-1):
             T_msk = (T_bins[i]<data.gas.temperatures) & (data.gas.temperatures<T_bins[i+1])
@@ -640,6 +615,7 @@ def compute_xray(input_filename,vector,radius,redshift_range,PLOT,COMPUTE,SEL_SP
                 abun.append(data.gas.smoothed_element_mass_fractions.oxygen[idx].value*(data.gas.masses[idx].to(unyt.Msun).value))
                 mass.append(data.gas.masses[idx].to(unyt.Msun).value)
                 reds.append(data.gas.redshifts.value[idx])
+                particleid.append(lightcone_data["ParticleIDs"][idx])
             else:
                 continue
         np.savez(work_path+'/data/'+'spec_particle',idx=idx_arr,mass=mass,temp=temp,abun=abun,reds=reds)
@@ -684,7 +660,7 @@ def plot_spec(flux_filename,idx_filename):
         print("spectrum_of_particle_"+str(idx)+" has been plotted!")
 
 
-def main(check_filename,redshift_range):
+def main(check_filename,redshift_range,obs_bin_received):
     '''
     This is function for calculating xray map data for one property and plotting
 
@@ -696,8 +672,18 @@ def main(check_filename,redshift_range):
     redshift_range: np.array (1x2)
         describe data's redshift_range, used in data's title
 
+    obs_bin_received: np.array (1x2)
+        observed energy range at z=0 for both z_halo_range and z_range particles
+    
+    continuum_bin: np.array (1x2)
+        if wants to reduce with continuum, input continuum energy range
+        if don't want to reduce the continuum, input empty list: []
+
     Returns
     ---------------------------------------
+    flux_inbin: np.array (particle num ,1)
+        flux in obs_bin_received that inside restframe energy bin, output for calculating contam
+
     save xray flux as npz
 
     plot xray
@@ -706,60 +692,83 @@ def main(check_filename,redshift_range):
     if os.path.exists(work_path+'/data/'+check_filename+'.npz') is False:
         # compute pure xrays
         print("computing " + check_filename)
-        flux,coor,restframe_energy = compute_xray(input_filename,vector,radius,redshift_range,PLOT=True, COMPUTE=True)
-        np.savez_compressed(work_path+'/data/'+check_filename+'.npz',flux=flux,coor=coor,restframe_energy = restframe_energy)
+        flux,pixel,restframe_energy,z_par,z_los = compute_xray(input_filename,vector,radius,redshift_range,PLOT=False, COMPUTE=False,SEL_SPEC_PARTICLE=True)
+        restframe_energy = restframe_energy.value
+        np.savez_compressed(work_path+'/data/'+check_filename+'.npz',flux=flux,pixel=pixel,restframe_energy = restframe_energy,z_par = z_par,z_los=z_los)
         print(work_path+'/data/'+check_filename+'.npz  has been saved!')
     else:
         print("loading " + check_filename)
         data = np.load(work_path+'/data/'+check_filename+'.npz')
-        flux = data['flux']
-        coor = data['coor']
+        flux = data['flux'].T
+        ## for new data
+        pixel = data['pixel']
         restframe_energy = data['restframe_energy']
-    
-    for i in range(len(restframe_energy)-1):
-        print("plotting " + check_filename +"bin %d"%i)
-        flux_map = compute_mapdata(coor,flux[i])
-        plot_settings = {"data_filter":[0],"mode":"log"}
-        plot_all(flux_map/pix_a,check_filename+'_'+str(restframe_energy[i])+'_'+str(restframe_energy[i+1]),r'erg/s/$cm^2/arcmin^2$','plasma',redshift_range,plot_settings)
+        z_par = data['z_par']
+        z_los = data['z_los']
+
+    ## for every particle
+    restE_lo = obs_bin_received[0]*(1+z_par)*(1+z_los)
+    restE_hi = obs_bin_received[1]*(1+z_par)*(1+z_los)
+    flux_inbin,tstE_lo,tstE_hi = [np.zeros(len(restE_lo)) for i in range(3)]
+    print("calculating emission map ...")
+    print(obs_bin_received) # both obs_bin_received and restframe_energy are np.array (keV), not unyt array
+    print(np.min(restE_lo),np.max(restE_hi))
+    # print(restframe_energy)
+    for i in range(len(restE_lo)):
+        idx1 = np.arange(len(restframe_energy))
+        idx = idx1[(restframe_energy-restE_lo[i]>=0) & (restframe_energy-restE_hi[i]<=0)]
+        # print(idx)
+        flux_inbin[i]=np.sum(flux[i][idx])
+        tstE_lo[i] = restframe_energy[idx[0]]
+        tstE_hi[i] = restframe_energy[idx[-1]]
+
+    print(np.min(tstE_lo),np.max(tstE_hi))
+    print("plotting " + check_filename )
+    flux_map = compute_mapdata(pixel,flux_inbin/pix_a)
+    plot_settings = {"data_filter":[0],"mode":"log"}
+    plot_all(flux_map/pix_a,check_filename+'_'+"{:.2f}".format(np.min(restE_lo))+'_'+"{:.2f}".format(np.max(restE_hi)),r'erg/s/$cm^2/arcmin^2$','plasma',redshift_range,plot_settings)
+    # np.savez(work_path+"/data/"+check_filename+"{:.2f}".format(restE_lo)+'_'+"{:.2f}".format(restE_hi),flux_inbin=flux_inbin,restE_lo = np.min(restE_lo),restE_hi = np.max(restE_hi))
+    return flux_inbin,np.min(restE_lo),np.max(restE_hi)
+        
 
 
+### compute, save and plot pure and total data, if has computed pure and tot before, just load the data
+flux_pure,restE_lo,restE_hi = main('xray_flux_pure',z_halo_range,obs_bin_received)
 
-# ##### compute, save and plot pure and total data, if has computed pure and tot before, just load the data
-# main('xray_flux_pure',z_halo_range)
-# main('xray_flux_tot',z_range)
+flux_tot,restE_tot_lo,restE_tot_hi = main('xray_flux_tot',z_range,obs_bin_received)
 
-compute_xray(input_filename,vector,radius,z_halo_range,PLOT=False,COMPUTE=False,SEL_SPEC_PARTICLE=True)
-plot_spec("xray_flux_pure.npz","spec_particle.npz")
+##### compute, plot contam data (saving takes lots of time, so didn't save contam)
+print('computing contam ... ')
+data_pure = np.load(work_path+'/data/'+'xray_flux_pure'+'.npz')
+data_tot = np.load(work_path+'/data/'+'xray_flux_tot'+'.npz')
 
-# ##### compute, plot contam data (saving takes lots of time, so didn't save contam)
-# print('computing contam ... ')
-# data_pure = np.load(work_path+'/data/'+'xray_flux_pure'+'.npz')
-# data_tot = np.load(work_path+'/data/'+'xray_flux_tot'+'.npz')
-# flux_pure = data_pure['flux']
-# # print(np.shape(data_pure['flux']))
-# # print(np.shape(flux_pure))
-# # print(np.count_nonzero(flux_pure))
+## for new data 
+tot_pix = data_tot['pixel']
+pure_pix = data_pure['pixel']
 
-# pure_coor = data_pure['coor']
-# flux_tot = data_tot['flux']
-# # print(np.shape(data_tot['flux']))
-# # print(np.shape(flux_tot))
-# # print(np.count_nonzero(flux_tot))
-# tot_coor = data_tot['coor']
 # # calculate 2 map directly and substract them
-# flux_map_tot = compute_mapdata(tot_coor,flux_tot)
-# flux_map_pure = compute_mapdata(pure_coor,flux_pure)
+flux_map_tot = compute_mapdata(tot_pix,flux_tot)
+# flux_map_pure = compute_mapdata(pure_pix,flux_pure)
 # flux_map = flux_map_tot-flux_map_pure
-# # print(np.count_nonzero(flux_map))
-# plot_settings = {"data_filter":[1e30,1e36], "cmap":"binary"}
+# plot_settings = {"data_filter":[], "mode":"log"}
+# plot_all(flux_map/pix_a,'xray_contam'+"{:.2f}".format(restE_lo)+'_'+"{:.2f}".format(np.max(restE_hi)),r'erg/s/$cm^2/arcmin^2$','plasma',z_range,plot_settings) 
 
-# plot_all(flux_map/pix_a,'xray_contam',r'erg/s/$cm^2/arcmin^2$','plasma',z_range,plot_settings) 
-# del flux_map_pure,flux_map_tot,flux_map,data_pure,data_tot,flux_pure,pure_coor,flux_tot,tot_coor
+#### reduce emission map with continuum
+print("computing tot-continuum ...")
+contin_bin_rest = [0.71,0.725]
+flux_contin_tot,restE_contin_lo,restE_contin_hi = main('xray_flux_tot',z_range,contin_bin_rest/(1+z_halo.value))
+flux_contin_tot = np.array(flux_contin_tot)*(restE_tot_hi-restE_tot_lo)/(restE_contin_hi-restE_contin_lo)
+flux_map_contin_tot = compute_mapdata(tot_pix,flux_contin_tot)
+flux_map_contin_tot = flux_map_tot-flux_map_contin_tot
+plot_settings = {"data_filter":[], "mode":"log"}
+plot_all(flux_map_contin_tot/pix_a,'xray_tot-xray_contin'+"{:.2f}".format(restE_tot_lo)+'_'+"{:.2f}".format(np.max(restE_tot_hi)),r'erg/s/$cm^2/arcmin^2$','plasma',z_range,plot_settings) 
 
 
-### select halo
-# select_halo(input_filename,0,1e2,1e3,RELAX=True)
+## select halo
+# select_halo(input_filename,0,1e4,1e5,RELAX=False)
 # print(np.load("haloid_m200c_100.0_1000.0_1e10msun_z_0.05_lightcone0_relaxed.npy"))
-# load_halo_properties(12464493,0)
+# load_halo_properties(10976025,0)
 
- 
+# plot spectrum
+compute_xray(input_filename,vector,radius,z_halo_range,PLOT=False, COMPUTE=False,SEL_SPEC_PARTICLE=True)
+# plot_spec("xray_flux_pure.npz","spec_particle.npz")
