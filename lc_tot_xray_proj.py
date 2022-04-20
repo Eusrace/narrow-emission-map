@@ -241,7 +241,7 @@ def load_halo_properties(halo_id,catalog_redshift):
 global halo_id,nside,radius,vector,work_path,zoom_size,z_halo,z_halo_range,z_range,rest_line_bin,npix,PLOT,xsize,pix_a
 
 ## halo basics
-halo_id = '10976067'
+halo_id = '11079805'
 z_halo, z_halo_range, __,__, __,__, vector = load_halo_properties(int(halo_id),0)
 
 ### healpy plotting basics
@@ -655,6 +655,61 @@ def plot_spec(flux_filename,idx_filename):
         plt.close()
         print("spectrum_of_particle_"+str(idx)+" has been plotted!")
 
+def sel_flux(obs_bin_received,restframe_energy,flux,z_par,z_los,mode):
+    '''
+    This function select emission that will fall in observable bins (for plotting total, continuum)
+
+    Parameters
+    -------------------------
+    obs_bin_received: np.array (1x2)
+        energy bin observer received at z=0
+    
+    restframe_energy: np.array
+        restframe_energy bin that has been fixed when interpolating xray (bin size fixed in supermaster)
+    
+    flux: 
+        output of computing xray
+    
+    z_par: np.array
+        particle redshifts
+    
+    z_los: np.array
+        line of sight redshifts
+    
+    mode: str 
+        if mode=="sum", calculate sum flux in this energy range
+        if mode=="med", calculate median flux in this energy range
+
+    Returns
+    -------------------------
+    flux: np.array (1xparticle num)
+        xray flux for each particle in certain energy range
+    
+    '''
+
+    ### for every particle
+    restE_lo = obs_bin_received[0]*(1+z_par)*(1+z_los)
+    restE_hi = obs_bin_received[1]*(1+z_par)*(1+z_los)
+    
+    ### for total emission
+    flux_inbin,tstE_lo,tstE_hi = [np.zeros(len(restE_lo)) for i in range(3)]
+    print("selecting flux ...")
+    print(obs_bin_received) # both obs_bin_received and restframe_energy are np.array (keV), not unyt array
+    print(np.min(restE_lo),np.max(restE_hi))
+
+    for i in tqdm(range(len(z_par))):
+        idx1 = np.arange(len(restframe_energy))
+        idx = idx1[(restframe_energy-restE_lo[i]>=0) & (restframe_energy-restE_hi[i]<=0)]
+        if mode =='sum':
+            flux_inbin[i]=np.sum(flux[i][idx])
+        if mode =='med':
+            flux_inbin[i]=np.median(flux[i][idx])
+        tstE_lo[i] = restframe_energy[idx[0]]
+        tstE_hi[i] = restframe_energy[idx[-1]]
+    print(idx) # check there are many bins for continuum 
+    print("particle energy ranges due to redshifts ",[np.min(tstE_lo),np.max(tstE_hi)])
+
+    return flux_inbin
 
 def main(check_filename,redshift_range,obs_bin_rest,obs_bin_received):
     '''
@@ -707,14 +762,14 @@ def main(check_filename,redshift_range,obs_bin_rest,obs_bin_received):
         z_los = data['z_los']
 
     
-    ### for every particle
+    # ### for every particle
     restE_lo = obs_bin_received[0]*(1+z_par)*(1+z_los)
     restE_hi = obs_bin_received[1]*(1+z_par)*(1+z_los)
 
     ### for pure emission (if there is only OVIII line in spectrum)
     ## find obs_bin_rest corresponds to which restframe_energy bin
-    idx_pure = np.where((restframe_energy>=obs_bin_rest[0]) & (restframe_energy<=obs_bin_rest[1]))
-    print("pure bin in restframe_energy array is ", idx_pure)
+    idx_pure = np.where((restframe_energy>=obs_bin_rest[0]) & (restframe_energy<=obs_bin_rest[1])) 
+    print("pure bin in restframe_energy array is ", idx_pure) # make sure there is only one bin
     ## if particles OVIII redshift out of OVIII bin, set emission as 0
     flux_pure = np.sum(flux[:,idx_pure],axis=1)
     flux_pure[(restE_lo > obs_bin_rest[0]) & (restE_hi < obs_bin_rest[1])] = 0
@@ -724,22 +779,10 @@ def main(check_filename,redshift_range,obs_bin_rest,obs_bin_received):
     plot_settings = {"data_filter":[1e-41,2e-13],"mode":"log"}
     plot_all(flux_map_pure/pix_a,check_filename+'_pure',r'erg/s/$cm^2/arcmin^2$','plasma',redshift_range,plot_settings)
     
-    ### for total emission
-    flux_inbin,tstE_lo,tstE_hi = [np.zeros(len(restE_lo)) for i in range(3)]
-    print("calculating tot emission map ...")
-    print(obs_bin_received) # both obs_bin_received and restframe_energy are np.array (keV), not unyt array
-    print(np.min(restE_lo),np.max(restE_hi))
-
-    for i in range(len(z_par)):
-        idx1 = np.arange(len(restframe_energy))
-        idx = idx1[(restframe_energy-restE_lo[i]>=0) & (restframe_energy-restE_hi[i]<=0)]
-        flux_inbin[i]=np.sum(flux[i][idx])
-        tstE_lo[i] = restframe_energy[idx[0]]
-        tstE_hi[i] = restframe_energy[idx[-1]]
-
-    print(np.min(tstE_lo),np.max(tstE_hi))
+    ## for total emission
+    flux_tot = sel_flux(obs_bin_received,restframe_energy,flux,z_par,z_los,'sum')
     print("plotting total ... ")
-    flux_map_tot = compute_mapdata(pixel,flux_inbin)
+    flux_map_tot = compute_mapdata(pixel,flux_tot)
     plot_settings = {"data_filter":[1e-41,2e-13],"mode":"log"}
     plot_all(flux_map_tot/pix_a,check_filename+'_tot',r'erg/s/$cm^2/arcmin^2$','plasma',redshift_range,plot_settings)
 
@@ -751,48 +794,25 @@ def main(check_filename,redshift_range,obs_bin_rest,obs_bin_received):
     
     ### for continuum
     print("plotting continuum ... ")
-    contin_bin_num = 10
-    contin_bin_idx = [min(idx_pure)-1-contin_bin_num,min(idx_pure)-1]+[max(idx_pure)+1,max(idx_pure)+1+contin_bin_num]
-    flux_contin = np.sum(flux[:,contin_bin_idx],axis=1)
-    contin_weight = (obs_bin_rest[1]-obs_bin_rest[0])/(restframe_energy[max(contin_bin_idx)]-restframe_energy[min(contin_bin_idx)])
+    contin_bin_obs1 = np.array([obs_bin_received[0]-0.04,obs_bin_received[0]])
+    contin_bin_obs2 = np.array([obs_bin_received[1],obs_bin_received[1]+0.04])
+
+    flux_contin1 = sel_flux(contin_bin_obs1,restframe_energy,flux,z_par,z_los,'med')
+    flux_contin2 = sel_flux(contin_bin_obs2,restframe_energy,flux,z_par,z_los,'med')
+    np.savez(work_path+"/data/flux_contin",contin1 = flux_contin1,contin2 = flux_contin2)
+
+    flux_contin = (flux_contin1+flux_contin2)/2
     flux_map_contin = compute_mapdata(pixel,flux_contin)
-    plot_settings = {"data_filter":[],"mode":"log"}
-    plot_all(flux_map_contin/pix_a,check_filename+'_contin',r'erg/s/$cm^2/arcmin^2$','plasma',redshift_range,plot_settings)
     plot_settings = {"data_filter":[1e-41,2e-13],"mode":"log"}
-    plot_all(flux_map_contin/pix_a*contin_weight,check_filename+'_weightedcontin',r'erg/s/$cm^2/arcmin^2$','plasma',redshift_range,plot_settings)
+    plot_all(flux_map_contin/pix_a,check_filename+'_contin',r'erg/s/$cm^2/arcmin^2$','plasma',redshift_range,plot_settings)
+    flux_map_redcontin = flux_map_tot-flux_map_contin
+    plot_settings = {"data_filter":[1e-41,2e-13],"mode":"log"}
+    plot_all(flux_map_redcontin/pix_a,check_filename+'_tot-contin',r'erg/s/$cm^2/arcmin^2$','plasma',redshift_range,plot_settings)
         
 
 
-# ### compute, save and plot pure and total data, if has computed pure and tot before, just load the data
-
-main('xray_flux_tot',z_range,obs_bin_rest,obs_bin_received)
-
-# ##### compute, plot contam data (saving takes lots of time, so didn't save contam)
-# print('computing contam ... ')
-# data_pure = np.load(work_path+'/data/'+'xray_flux_pure'+'.npz')
-# data_tot = np.load(work_path+'/data/'+'xray_flux_tot'+'.npz')
-
-# ## for new data 
-# tot_pix = data_tot['pixel']
-# pure_pix = data_pure['pixel']
-
-# # # calculate 2 map directly and substract them
-# flux_map_tot = compute_mapdata(tot_pix,flux_tot)
-# # flux_map_pure = compute_mapdata(pure_pix,flux_pure)
-# # flux_map = flux_map_tot-flux_map_pure
-# # plot_settings = {"data_filter":[], "mode":"log"}
-# # plot_all(flux_map/pix_a,'xray_contam'+"{:.2f}".format(restE_lo)+'_'+"{:.2f}".format(np.max(restE_hi)),r'erg/s/$cm^2/arcmin^2$','plasma',z_range,plot_settings) 
-
-# #### reduce emission map with continuum
-# print("computing tot-continuum ...")
-# contin_bin_rest = [0.71,0.725]
-# flux_contin_tot,restE_contin_lo,restE_contin_hi = main('xray_flux_tot',z_range,contin_bin_rest/(1+z_halo.value))
-# flux_contin_tot = np.array(flux_contin_tot)*(restE_tot_hi-restE_tot_lo)/(restE_contin_hi-restE_contin_lo)
-# flux_map_contin_tot = compute_mapdata(tot_pix,flux_contin_tot)
-# flux_map_contin_tot = flux_map_tot-flux_map_contin_tot
-# plot_settings = {"data_filter":[], "mode":"log"}
-# plot_all(flux_map_contin_tot/pix_a,'xray_tot-xray_contin'+"{:.2f}".format(restE_tot_lo)+'_'+"{:.2f}".format(np.max(restE_tot_hi)),r'erg/s/$cm^2/arcmin^2$','plasma',z_range,plot_settings) 
-
+# ### compute, save and plot data
+main('xray_flux',z_range,obs_bin_rest,obs_bin_received)
 
 ## select halo
 # select_halo(input_filename,0,1e4,1e5,RELAX=False)
